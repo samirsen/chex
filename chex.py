@@ -10,16 +10,37 @@ found.
 
 Requires https://pypi.python.org/pypi/python-chess, 
 https://github.com/spotify/annoy, and https://pypi.python.org/pypi/sqlitedict.
+
+for uncompressing: bin(int(binascii.hexlify('\x12\xaa\xb5*\x94\xa7\xf5*R\xa5I/'), 16))
+'0b100101010101010110101001010101001010010100111111101010010101001010010101001010100100100101111'
 """
 import chess
+import struct
 from annoy import Annoyindex
 from sqlitedict import SqliteDict
+import binascii
 
 _help_intro = """chex is a search engine for chess game states."""
 
 def help_formatter(prog):
     """ So formatter_class's max_help_position can be changed. """
     return argparse.HelpFormatter(prog, max_help_position=40)
+
+# For bitvector conversion
+_offsets = {
+    'p' : 0,
+    'P' : 1,
+    'n' : 2,
+    'N' : 3,
+    'b' : 4,
+    'B' : 5,
+    'k' : 6,
+    'K' : 7,
+    'r' : 8,
+    'R' : 9,
+    'q' : 10,
+    'Q' : 11,
+}
 
 def node_to_bitvector(node):
     """ Converts chess module's node to bitvector game state representation.
@@ -28,6 +49,14 @@ def node_to_bitvector(node):
 
         Return value: binary vector of length 768 as Python list
     """
+    board = node.board()
+    bitvector = [0 for _ in xrange(768)]
+    for i in xrange(64):
+        try:
+            bitvector[i*12 + _offsets[board.piece_at(i)]] = 1
+        except KeyError:
+            pass
+    return bitvector
 
 class ChexIndex(AnnoyIndex):
     """ Manages game states from Annoy Index and SQL database. """
@@ -50,12 +79,20 @@ class ChexIndex(AnnoyIndex):
 
             No return value.
         """
-        i = 0
-        while not node.is_end():
-            i += 1
+        game_id = node.headers[self.id_label]
+        for _ in xrange(self.first_indexed_move - 1):
             node = node.variations[0]
-            if i < first_indexed_move: continue
-            
+        while True:
+            bitvector = node_to_bitvector(node)
+            self.add_item(bitvector)
+            # Store as ASCII; 
+            key = binascii.unhexlify('%x' % int(''.join(bitvector), 2))
+            if key in self.chex_index:
+                self.chex_index[key] = self.chex_index[key] + [game_id]
+            else:
+                self.chex_index[key] = [game_id]
+            if node.is_end(): break
+            node = node.variations[0]
 
     def save():
         super(ChexIndex, self).save(
