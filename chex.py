@@ -15,10 +15,12 @@ for uncompressing: bin(int(binascii.hexlify('\x12\xaa\xb5*\x94\xa7\xf5*R\xa5I/')
 '0b100101010101010110101001010101001010010100111111101010010101001010010101001010100100100101111'
 """
 import chess
+import chess.pgn
 import struct
-from annoy import Annoyindex
-from sqlitedict import SqliteDict
 import binascii
+import argparse
+from annoy import AnnoyIndex
+from sqlitedict import SqliteDict
 
 _help_intro = """chex is a search engine for chess game states."""
 
@@ -125,7 +127,7 @@ if __name__ == '__main__':
             help=('indexes only those game states at least this many moves '
                   'into a given game')
         )
-    index_parser.add_argument('-p', '--pgn', metavar='<file(s)>', nargs='+',
+    index_parser.add_argument('-p', '--pgns', metavar='<file(s)>', nargs='+',
             required=True, type=str,
             help='space-separated list of PGNs to index'
         )
@@ -144,8 +146,18 @@ if __name__ == '__main__':
     search_parser.add_argument('-m', '--move', metavar='<int>',
             required=True, type=int,
             help='move number from PGN corresponding to state to search for')
-    index_parser.add_argument('-x', '--chex-index', metavar='<dir>',
+    search_parser.add_argument('-x', '--chex-index', metavar='<dir>',
             required=True, type=str,
             help='chex index directory'
         )
     args = parser.parse_args()
+    if args.subparser_name == 'index':
+        index = ChexIndex(args.chex_index, id_label=args.id_label,
+                            first_indexed_moe=args.first_indexed_move)
+        print 'Indexing PGNs...'
+        for pgn in args.pgns:
+            with open(pgn) as pgn_stream:
+                while True:
+                    index.add_game(chess.pgn.read_game(pgn_stream))
+    else:
+        assert args.subparser_name == 'search'
