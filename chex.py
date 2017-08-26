@@ -19,6 +19,8 @@ import chess.pgn
 import struct
 import binascii
 import argparse
+import errno
+import os
 from annoy import AnnoyIndex
 from sqlitedict import SqliteDict
 
@@ -55,8 +57,8 @@ def node_to_bitvector(node):
     bitvector = [0 for _ in xrange(768)]
     for i in xrange(64):
         try:
-            bitvector[i*12 + _offsets[board.piece_at(i)]] = 1
-        except KeyError:
+            bitvector[i*12 + _offsets[board.piece_at(i).symbol()]] = 1
+        except AttributeError:
             pass
     return bitvector
 
@@ -64,44 +66,66 @@ class ChexIndex(AnnoyIndex):
     """ Manages game states from Annoy Index and SQL database. """
 
     def __init__(self, chex_index, id_label='FICSGamesDBGameNo',
-                    first_indexed_move=10):
+                    first_indexed_move=10, n_trees=200):
         """ Number of dimensions is always 8 x 8 x 12; there are 6 black piece
         types, six white piece types, and the board is 8 x 8."""
         super(ChexIndex, self).__init__(768, metric='angular')
         self.id_label = id_label
         self.first_indexed_move = first_indexed_move
         self.chex_index = chex_index
+        try:
+            os.makedirs(self.chex_index)
+        except OSError as e:
+            if e.errno != errno.EEXIST:
+                raise
         self.chex_sql = SqliteDict(
                             os.path.join(self.chex_index, 'sqlite.idx'))
+        self.node_id = 0
+        self.n_trees = n_trees
 
-    def add_game(node):
+    def add_game(self, node):
         """ Adds game parsed by chess library to chex index.
 
             node: game object of type chess.pgn.Game
 
-            No return value.
+            Return value: 0 if game added successfully, else 1
         """
+        if node is None:
+            return 1
         game_id = node.headers[self.id_label]
-        for _ in xrange(self.first_indexed_move - 1):
+        move_number = 0
+        for move_number in xrange(self.first_indexed_move - 1):
             node = node.variations[0]
         while True:
+            move_number += 1
             bitvector = node_to_bitvector(node)
-            self.add_item(bitvector)
-            # Store as ASCII; 
-            key = binascii.unhexlify('%x' % int(''.join(bitvector), 2))
+            # Store as ASCII
+            to_unhexlify = '%x' % int(''.join(map(str, bitvector)), 2)
+            try:
+                key = binascii.unhexlify(to_unhexlify)
+            except TypeError:
+                key = binascii.unhexlify('0' + to_unhexlify)
             if key in self.chex_index:
-                self.chex_index[key] = self.chex_index[key] + [game_id]
+                self.chex_sql[key] = self.chex_sql[key] + [
+                                                        game_id, move_number
+                                                    ]
             else:
-                self.chex_index[key] = [game_id]
+                self.chex_sql[key] = [game_id, move_number]
+                self.add_item(self.node_id, bitvector)
+                self.node_id += 1
             if node.is_end(): break
             node = node.variations[0]
+        return 0
 
-    def save():
+    def save(self):
+        self.build(self.n_trees)
         super(ChexIndex, self).save(
                 os.path.join(self.chex_index, 'annoy.idx')
             )
         self.chex_sql.commit()
         self.chex_sql.close()
+
+
 
 if __name__ == '__main__':
     # Print file's docstring if -h is invoked
@@ -140,6 +164,11 @@ if __name__ == '__main__':
             required=True, type=str,
             help='directory in which to store chex index files'
         )
+    index_parser.add_argument('--n-trees', metavar='<int>', type=int,
+            required=False,
+            default=200,
+            help='number of annoy trees'
+        )
     search_parser.add_argument('-p', '--pgn', metavar='<file>',
             required=True, type=str,
             help='PGN describing game with state to search for')
@@ -153,11 +182,14 @@ if __name__ == '__main__':
     args = parser.parse_args()
     if args.subparser_name == 'index':
         index = ChexIndex(args.chex_index, id_label=args.id_label,
-                            first_indexed_moe=args.first_indexed_move)
+                            first_indexed_move=args.first_indexed_move,
+                            n_trees=args.n_trees)
         print 'Indexing PGNs...'
         for pgn in args.pgns:
             with open(pgn) as pgn_stream:
                 while True:
-                    index.add_game(chess.pgn.read_game(pgn_stream))
+                    if index.add_game(chess.pgn.read_game(pgn_stream)):
+                        break
+        index.save()
     else:
         assert args.subparser_name == 'search'
