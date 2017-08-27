@@ -18,6 +18,8 @@ import binascii
 import argparse
 import errno
 import os
+import sys
+import time
 from annoy import AnnoyIndex
 from sqlitedict import SqliteDict
 
@@ -122,7 +124,11 @@ class ChexIndex(AnnoyIndex):
         game_id = node.headers[self.id_label]
         move_number = 0
         for move_number in xrange(self.first_indexed_move - 1):
-            node = node.variations[0]
+            try:
+                node = node.variations[0]
+            except IndexError:
+                # Too few moves to index
+                return 0
         while True:
             move_number += 1
             bitvector = board_to_bitvector(node.board())
@@ -173,13 +179,15 @@ class ChexSearch(object):
                 (board, similarity score, [(game_id, move number), ...]), ...]
         """
         results = []
-        for bitvector, similarity in zip(
+        for annoy_id, similarity in zip(
                             *self.annoy_index.get_nns_by_vector(
                                     board_to_bitvector(board), self.results,
                                     include_distances=True
                         )):
             # Recompute ASCII key
-            to_unhexlify = '%x' % int(''.join(map(str, bitvector)), 2)
+            bitvector = self.annoy_index.get_item_vector(annoy_id)
+            to_unhexlify = '%x' % int(
+                                    ''.join(map(str, map(int, bitvector))), 2)
             try:
                 key = binascii.unhexlify(to_unhexlify)
             except TypeError:
@@ -187,6 +195,9 @@ class ChexSearch(object):
             results.append((bitvector_to_board(bitvector), similarity,
                                self.chex_sql[key]))
         return results
+
+    def close(self):
+        del self.annoy_index
 
 if __name__ == '__main__':
     # Print file's docstring if -h is invoked
@@ -212,7 +223,7 @@ if __name__ == '__main__':
             help=('indexes only those game states at least this many moves '
                   'into a given game')
         )
-    index_parser.add_argument('-p', '--pgns', metavar='<file(s)>', nargs='+',
+    index_parser.add_argument('-p', '--pgns', metavar='<files>', nargs='+',
             required=True, type=str,
             help='space-separated list of PGNs to index'
         )
@@ -254,26 +265,34 @@ if __name__ == '__main__':
         index = ChexIndex(args.chex_index, id_label=args.id_label,
                             first_indexed_move=args.first_indexed_move,
                             n_trees=args.n_trees)
-        print 'Indexing PGNs...'
         for pgn in args.pgns:
+            game_count = 0
             with open(pgn) as pgn_stream:
                 while True:
                     if index.add_game(chess.pgn.read_game(pgn_stream)):
                         break
+                    game_count += 1
+                    print 'Indexed {} games...\r'.format(game_count),
+                    sys.stdout.flush()
         index.save()
+        # TODO: clean up display of this
+        print 'Indexed {} games.'.format(game_count)
     else:
         assert args.subparser_name == 'search'
         searcher = ChexSearch(args.chex_index,
                                 results=args.results, search_k=args.search_k)
         # Pretty print results
         print '\t'.join(
-                    ['board FEN', 'similarity score', 'games', 'move numbers']
+                    ['rank', 'board FEN', 'similarity score', 'games',
+                        'move numbers']
                 )
-        for board, similarity, games in searcher.search(
+        for (rank, (board, similarity, games)) in enumerate(searcher.search(
                     chess.Board(args.board_fen + ' w KQkq - 0 1')
-                ):
+                )):
             games = zip(*games)
             print '\t'.join([
-                    board.board_fen(), str(similarity), ','.join(games[0]),
-                    ','.join(games[1])
+                    str(rank + 1), board.board_fen(), str(similarity),
+                    ','.join(games[0]), ','.join(map(str, games[1]))
                 ])
+        # Close may avoid shutdown exception for unknown reason
+        searcher.close()
