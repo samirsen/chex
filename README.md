@@ -5,5 +5,5 @@ Chex searches for chess game states that are similar to a game state input as th
 To write.
 
 # Contributors
-[Samir Sen](https://github.com/samirsen)
-[Abhi Nellore](https://github.com/nellore)
+* [Samir Sen](https://github.com/samirsen)
+* [Abhi Nellore](https://github.com/nellore)
