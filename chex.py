@@ -10,9 +10,6 @@ found.
 
 Requires https://pypi.python.org/pypi/python-chess, 
 https://github.com/spotify/annoy, and https://pypi.python.org/pypi/sqlitedict.
-
-for uncompressing: bin(int(binascii.hexlify('\x12\xaa\xb5*\x94\xa7\xf5*R\xa5I/'), 16))
-'0b100101010101010110101001010101001010010100111111101010010101001010010101001010100100100101111'
 """
 import chess
 import chess.pgn
@@ -46,14 +43,15 @@ _offsets = {
     'Q' : 11,
 }
 
-def node_to_bitvector(node):
-    """ Converts chess module's node to bitvector game state representation.
+_reverse_offsets = { value : key for key, value in _offsets.items() }
+
+def board_to_bitvector(board):
+    """ Converts chess module's board to bitvector game state representation.
 
         node: game object of type chess.pgn.Game
 
         Return value: binary vector of length 768 as Python list
     """
-    board = node.board()
     bitvector = [0 for _ in xrange(768)]
     for i in xrange(64):
         try:
@@ -61,6 +59,35 @@ def node_to_bitvector(node):
         except AttributeError:
             pass
     return bitvector
+
+def bitvector_to_board(bitvector):
+    """ Converts bitvector to board.
+
+        TODO: unit test.
+
+        bitvector: iterable of 768 1s and 0s
+
+        Return value: chess.Board representation of bitvector
+    """
+    fen = [[] for _ in xrange(8)]
+    for i in xrange(8):
+        streak = 0
+        for j in xrange(8):
+            segment = 12*(8*i + j)
+            piece = None
+            for offset in xrange(12):
+                if bitvector[segment + offset]:
+                    piece = _reverse_offsets[offset]
+            if piece is not None:
+                if streak: fen[i].append(str(streak))
+                fen[i].append(piece)
+                streak = 0
+            else:
+                streak += 1
+                if j == 7: fen[i].append(str(streak))
+    return chess.Board(
+            '/'.join([''.join(row) for row in fen][::-1]) + ' w KQkq - 0 1'
+        )
 
 class ChexIndex(AnnoyIndex):
     """ Manages game states from Annoy Index and SQL database. """
@@ -98,7 +125,7 @@ class ChexIndex(AnnoyIndex):
             node = node.variations[0]
         while True:
             move_number += 1
-            bitvector = node_to_bitvector(node)
+            bitvector = board_to_bitvector(node.board())
             # Store as ASCII
             to_unhexlify = '%x' % int(''.join(map(str, bitvector)), 2)
             try:
@@ -107,10 +134,10 @@ class ChexIndex(AnnoyIndex):
                 key = binascii.unhexlify('0' + to_unhexlify)
             if key in self.chex_index:
                 self.chex_sql[key] = self.chex_sql[key] + [
-                                                        game_id, move_number
+                                                        (game_id, move_number)
                                                     ]
             else:
-                self.chex_sql[key] = [game_id, move_number]
+                self.chex_sql[key] = [(game_id, move_number)]
                 self.add_item(self.node_id, bitvector)
                 self.node_id += 1
             if node.is_end(): break
@@ -125,7 +152,41 @@ class ChexIndex(AnnoyIndex):
         self.chex_sql.commit()
         self.chex_sql.close()
 
+class ChexSearch(object):
+    """ Searches Chex index for game states and associated games. """
 
+    def __init__(self, chex_index, results=10, search_k=40):
+        self.chex_index = chex_index
+        self.results = results
+        self.search_k = search_k
+        self.annoy_index = AnnoyIndex(768, metric='angular')
+        self.annoy_index.load(os.path.join(self.chex_index, 'annoy.idx'))
+        self.chex_sql = SqliteDict(
+                            os.path.join(self.chex_index, 'sqlite.idx'))
+
+    def search(self, board):
+        """ Searches for board.
+
+            board: game object of type chess.Board
+
+            Return value: [
+                (board, similarity score, [(game_id, move number), ...]), ...]
+        """
+        results = []
+        for bitvector, similarity in zip(
+                            *self.annoy_index.get_nns_by_vector(
+                                    board_to_bitvector(board), self.results,
+                                    include_distances=True
+                        )):
+            # Recompute ASCII key
+            to_unhexlify = '%x' % int(''.join(map(str, bitvector)), 2)
+            try:
+                key = binascii.unhexlify(to_unhexlify)
+            except TypeError:
+                key = binascii.unhexlify('0' + to_unhexlify)
+            results.append((bitvector_to_board(bitvector), similarity,
+                               self.chex_sql[key]))
+        return results
 
 if __name__ == '__main__':
     # Print file's docstring if -h is invoked
@@ -164,20 +225,29 @@ if __name__ == '__main__':
             required=True, type=str,
             help='directory in which to store chex index files'
         )
+    # Test various values!
     index_parser.add_argument('--n-trees', metavar='<int>', type=int,
             required=False,
             default=200,
             help='number of annoy trees'
         )
-    search_parser.add_argument('-p', '--pgn', metavar='<file>',
+    search_parser.add_argument('-f', '--board-fen', metavar='<file>',
             required=True, type=str,
-            help='PGN describing game with state to search for')
-    search_parser.add_argument('-m', '--move', metavar='<int>',
-            required=True, type=int,
-            help='move number from PGN corresponding to state to search for')
+            help='first field of FEN describing board to search for')
     search_parser.add_argument('-x', '--chex-index', metavar='<dir>',
             required=True, type=str,
             help='chex index directory'
+        )
+    # Test various values!
+    search_parser.add_argument('--search-k', metavar='<int>',
+            required=False, type=int,
+            default=-1,
+            help='annoy search-k; default is results * n_trees'
+        )
+    search_parser.add_argument('--results', metavar='<int>',
+            required=False, type=int,
+            default=10,
+            help='maximum number of returned game states'
         )
     args = parser.parse_args()
     if args.subparser_name == 'index':
@@ -193,3 +263,17 @@ if __name__ == '__main__':
         index.save()
     else:
         assert args.subparser_name == 'search'
+        searcher = ChexSearch(args.chex_index,
+                                results=args.results, search_k=args.search_k)
+        # Pretty print results
+        print '\t'.join(
+                    ['board FEN', 'similarity score', 'games', 'move numbers']
+                )
+        for board, similarity, games in searcher.search(
+                    chess.Board(args.board_fen + ' w KQkq - 0 1')
+                ):
+            games = zip(*games)
+            print '\t'.join([
+                    board.board_fen(), str(similarity), ','.join(games[0]),
+                    ','.join(games[1])
+                ])
