@@ -47,6 +47,21 @@ _offsets = {
 
 _reverse_offsets = { value : key for key, value in _offsets.items() }
 
+_reverse_colors_offsets = {
+    'p' : 1,
+    'P' : 0,
+    'n' : 3,
+    'N' : 2,
+    'b' : 5,
+    'B' : 4,
+    'k' : 7,
+    'K' : 6,
+    'r' : 9,
+    'R' : 8,
+    'q' : 11,
+    'Q' : 10,
+}
+
 def board_to_bitvector(board):
     """ Converts chess module's board to bitvector game state representation.
 
@@ -91,8 +106,45 @@ def bitvector_to_board(bitvector):
             '/'.join([''.join(row) for row in fen][::-1]) + ' w KQkq - 0 1'
         )
 
+def invert_board(board):
+    """ This function computes bitvector of given position but with inverted colors. """
+    inversevector = [0 for _ in xrange(768)]
+    for i in xrange(64):
+        try:
+            inversevector[i * 12 + _reverse_colors_offsets[board.piece_at(i).symbol()]] = 1
+        except AttributeError:
+            pass
+    return inversevector
+
+def flip_board(board):
+    """ This function computes bitvector of the mirror image of a given position. """
+    flipvector = [0 for _ in xrange(768)]
+    for i in range(8):
+        for j in range(8):
+            try:
+                flipvector[12*(8*i + 7 - j) + _offsets[board.piece_at(8*i + j).symbol()]] = 1
+            except AttributeError:
+                pass
+
+    return flipvector
+
+def reverse_and_flip(board):
+    """ This function computes the bitvector after flipping a given position and reversing the colors. """
+    reversevector = [0 for _ in xrange(768)]
+    for i in range(8):
+        for j in range(8):
+            try:
+                reversevector[12*(8*i + 7 - j) + _reverse_colors_offsets[board.piece_at(8*i + j).symbol()]] = 1
+            except AttributeError:
+                pass
+
+    return reversevector
+
+
 class ChexIndex(AnnoyIndex):
     """ Manages game states from Annoy Index and SQL database. """
+
+    #TODO: Compute ASCII of B, I(B), F(B) and I(F(B)) and only store min(ASCII's) into the chex index.
 
     def __init__(self, chex_index, id_label='FICSGamesDBGameNo',
                     first_indexed_move=10, n_trees=200):
@@ -121,6 +173,7 @@ class ChexIndex(AnnoyIndex):
         """
         if node is None:
             return 1
+
         game_id = node.headers[self.id_label]
         move_number = 0
         for move_number in xrange(self.first_indexed_move - 1):
@@ -129,11 +182,20 @@ class ChexIndex(AnnoyIndex):
             except IndexError:
                 # Too few moves to index
                 return 0
+
         while True:
             move_number += 1
+
             bitvector = board_to_bitvector(node.board())
+            inversevector = invert_board(node.board())
+            flipvector = flip_board(node.board())
+            reversevector = reverse_and_flip(node.board())
+
             # Store as ASCII
-            to_unhexlify = '%x' % int(''.join(map(str, bitvector)), 2)
+            # to_unhexlify = '%x' % int(''.join(map(str, bitvector)), 2)
+
+            to_unhexlify = min(('%x' % int(''.join(map(str, bitvector)), 2)), ('%x' % int(''.join(map(str, inversevector)), 2)),
+                               ('%x' % int(''.join(map(str, flipvector)), 2)), ('%x' % int(''.join(map(str, reversevector)), 2)))
             try:
                 key = binascii.unhexlify(to_unhexlify)
             except TypeError:
@@ -148,6 +210,7 @@ class ChexIndex(AnnoyIndex):
                 self.node_id += 1
             if node.is_end(): break
             node = node.variations[0]
+
         return 0
 
     def save(self):
@@ -160,6 +223,8 @@ class ChexIndex(AnnoyIndex):
 
 class ChexSearch(object):
     """ Searches Chex index for game states and associated games. """
+
+    #TODO: Compute B, I(B), F(B) and I(F(B)) and search these in chex index. Combine results.
 
     def __init__(self, chex_index, results=10, search_k=40):
         self.chex_index = chex_index
@@ -178,22 +243,26 @@ class ChexSearch(object):
             Return value: [
                 (board, similarity score, [(game_id, move number), ...]), ...]
         """
+
+        symmetrical_boards = [board_to_bitvector(board), invert_board(board), flip_board(board), reverse_and_flip(board)]
+
         results = []
-        for annoy_id, similarity in zip(
-                            *self.annoy_index.get_nns_by_vector(
-                                    board_to_bitvector(board), self.results,
-                                    include_distances=True
-                        )):
-            # Recompute ASCII key
-            bitvector = self.annoy_index.get_item_vector(annoy_id)
-            to_unhexlify = '%x' % int(
-                                    ''.join(map(str, map(int, bitvector))), 2)
-            try:
-                key = binascii.unhexlify(to_unhexlify)
-            except TypeError:
-                key = binascii.unhexlify('0' + to_unhexlify)
-            results.append((bitvector_to_board(bitvector), similarity,
-                               self.chex_sql[key]))
+        for bitvector in symmetrical_boards:
+            for annoy_id, similarity in zip(
+                                *self.annoy_index.get_nns_by_vector(
+                                        bitvector, self.results,
+                                        include_distances=True
+                            )):
+                # Recompute ASCII key
+                bitvector = self.annoy_index.get_item_vector(annoy_id)
+                to_unhexlify = '%x' % int(
+                                        ''.join(map(str, map(int, bitvector))), 2)
+                try:
+                    key = binascii.unhexlify(to_unhexlify)
+                except TypeError:
+                    key = binascii.unhexlify('0' + to_unhexlify)
+                results.append((bitvector_to_board(bitvector), similarity,
+                                self.chex_sql[key]))
         return results
 
     def close(self):
@@ -262,9 +331,11 @@ if __name__ == '__main__':
         )
     args = parser.parse_args()
     if args.subparser_name == 'index':
-        index = ChexIndex(args.chex_index, id_label=args.id_label,
+        # print args.chex_index, args.id_label, args.first_indexed_move, args.n_trees, args.pgns
+        index = ChexIndex(chex_index=args.chex_index, id_label=args.id_label,
                             first_indexed_move=args.first_indexed_move,
                             n_trees=args.n_trees)
+
         for pgn in args.pgns:
             game_count = 0
             with open(pgn) as pgn_stream:
