@@ -134,22 +134,24 @@ def key_to_bitboard(key):
 
 
 def invert_board(board):
-    """ This function computes bitboard of given position but with inverted colors. """
+    """ Computes bitboard of given position but with inverted colors. """
     inversevector = [0 for _ in xrange(768)]
     for i in xrange(64):
         try:
-            inversevector[i * 12 + _reverse_colors_offsets[board.piece_at(i).symbol()]] = 1
+            inversevector[i * 12
+                    + _reverse_colors_offsets[board.piece_at(i).symbol()]] = 1
         except AttributeError:
             pass
     return inversevector
 
 def flip_board(board):
-    """ This function computes bitboard of the mirror image of a given position. """
+    """ Computes bitboard of the mirror image of a given position. """
     flipvector = [0 for _ in xrange(768)]
     for i in range(8):
         for j in range(8):
             try:
-                flipvector[12*(8*i + 7 - j) + _offsets[board.piece_at(8*i + j).symbol()]] = 1
+                flipvector[12*(8*i + 7 - j)
+                    + _offsets[board.piece_at(8*i + j).symbol()]] = 1
             except AttributeError:
                 pass
 
@@ -166,7 +168,9 @@ def reverse_and_flip(board):
     for i in range(8):
         for j in range(8):
             try:
-                reversevector[12*(8*i + 7 - j) + _reverse_colors_offsets[board.piece_at(8*i + j).symbol()]] = 1
+                reversevector[12*(8*i + 7 - j)
+                                + _reverse_colors_offsets[
+                                        board.piece_at(8*i + j).symbol()]] = 1
             except AttributeError:
                 pass
 
@@ -191,11 +195,11 @@ class ChexIndex(AnnoyIndex):
                 raise
         self.chex_sql = SqliteDict(
                             os.path.join(self.chex_index, 'sqlite.idx'))
-        self.node_id = 0
         self.n_trees = n_trees
+        self.key_count = 0
 
     def add_game(self, node):
-        """ Adds game parsed by chess library to chex index.
+        """ Adds game parsed by chess library to chex SQL database.
 
             node: game object of type chess.pgn.Game
 
@@ -221,37 +225,34 @@ class ChexIndex(AnnoyIndex):
             flipvector = flip_board(node.board())
             reversevector = reverse_and_flip(node.board())
 
-            # Store as ASCII
-            # to_unhexlify = '%x' % int(''.join(map(str, bitboard)), 2)
-
-            to_unhexlify = min(
-                        ('%x' % int(''.join(map(str, bitboard)), 2)),
-                        ('%x' % int(''.join(map(str, inversevector)), 2)),
-                        ('%x' % int(''.join(map(str, flipvector)), 2)),
-                        ('%x' % int(''.join(map(str, reversevector)), 2))
-                    )
-            try:
-                key = binascii.unhexlify(to_unhexlify)
-            except TypeError:
-                key = binascii.unhexlify('0' + to_unhexlify)
+            # Store as ASCII; use minimum of strategically equivalent boards
+            # See https://github.com/samirsen/chex/issues/1 for details
+            key = min(map(bitboard_to_key,
+                        [bitboard, inversevector, flipvector, reversevector]))
             if key in self.chex_index:
                 self.chex_sql[key] = self.chex_sql[key] + [
                                                         (game_id, move_number)
                                                     ]
             else:
                 self.chex_sql[key] = [(game_id, move_number)]
-                self.add_item(self.node_id, bitboard)
-                self.node_id += 1
+                self.key_count += 1
             if node.is_end(): break
             node = node.variations[0]
 
         return 0
 
+    def _mahalanobis(self):
+
     def _annoy_index(self):
+        """ Adds all boards from chex SQL database to Annoy index
+
+            No return value.
         """
-        """
+        for i, key in enumerate(self.chex_sql):
+            self.add_item(i, key_to_bitboard(key))
 
     def save(self):
+        self._annoy_index()
         self.build(self.n_trees)
         super(ChexIndex, self).save(
                 os.path.join(self.chex_index, 'annoy.idx')
@@ -262,7 +263,7 @@ class ChexIndex(AnnoyIndex):
 class ChexSearch(object):
     """ Searches Chex index for game states and associated games. """
 
-    #TODO: Compute B, I(B), F(B) and I(F(B)) and search these in chex index. Combine results.
+    #TODO: Combine results of board transforms with binary search algo.
 
     def __init__(self, chex_index, results=10, search_k=40):
         self.chex_index = chex_index
