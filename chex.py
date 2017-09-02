@@ -518,7 +518,7 @@ if __name__ == '__main__':
     console.setFormatter(formatter)
     logging.getLogger('').addHandler(console)
     if args.subparser_name == 'index':
-        index = ChexIndex(chex_index=args.chex_index, id_label=args.id_label,
+        index = ChexIndex(args.chex_index, id_label=args.id_label,
                             first_indexed_move=args.first_indexed_move,
                             n_trees=args.n_trees, scratch=args.scratch,
                             learning_rate=args.learning_rate,
