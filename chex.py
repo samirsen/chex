@@ -29,7 +29,7 @@ def help_formatter(prog):
     """ So formatter_class's max_help_position can be changed. """
     return argparse.HelpFormatter(prog, max_help_position=40)
 
-# For bitvector conversion
+# For bitboard conversion
 _offsets = {
     'p' : 0,
     'P' : 1,
@@ -62,29 +62,31 @@ _reverse_colors_offsets = {
     'Q' : 10,
 }
 
-def board_to_bitvector(board):
-    """ Converts chess module's board to bitvector game state representation.
+
+
+def board_to_bitboard(board):
+    """ Converts chess module's board to bitboard game state representation.
 
         node: game object of type chess.pgn.Game
 
         Return value: binary vector of length 768 as Python list
     """
-    bitvector = [0 for _ in xrange(768)]
+    bitboard = [0 for _ in xrange(768)]
     for i in xrange(64):
         try:
-            bitvector[i*12 + _offsets[board.piece_at(i).symbol()]] = 1
+            bitboard[i*12 + _offsets[board.piece_at(i).symbol()]] = 1
         except AttributeError:
             pass
-    return bitvector
+    return bitboard
 
-def bitvector_to_board(bitvector):
-    """ Converts bitvector to board.
+def bitboard_to_board(bitboard):
+    """ Converts bitboard to board.
 
         TODO: unit test.
 
-        bitvector: iterable of 768 1s and 0s
+        bitboard: iterable of 768 1s and 0s
 
-        Return value: chess.Board representation of bitvector
+        Return value: chess.Board representation of bitboard
     """
     fen = [[] for _ in xrange(8)]
     for i in xrange(8):
@@ -93,7 +95,7 @@ def bitvector_to_board(bitvector):
             segment = 12*(8*i + j)
             piece = None
             for offset in xrange(12):
-                if bitvector[segment + offset]:
+                if bitboard[segment + offset]:
                     piece = _reverse_offsets[offset]
             if piece is not None:
                 if streak: fen[i].append(str(streak))
@@ -106,8 +108,33 @@ def bitvector_to_board(bitvector):
             '/'.join([''.join(row) for row in fen][::-1]) + ' w KQkq - 0 1'
         )
 
+def bitboard_to_key(bitboard):
+    """ Converts bitboard to ASCII representation used as key in SQL database.
+
+        bitboard: bitboard representation of chess board
+
+        Return value: ASCII representation of bitboard
+    """
+    to_unhexlify = '%x' % int(''.join(map(str, map(int, bitboard))), 2)
+    try:
+        return binascii.unhexlify(to_unhexlify)
+    except TypeError:
+        return binascii.unhexlify('0' + to_unhexlify)
+
+def key_to_bitboard(key):
+    """ Converts ASCII representation of board to bitboard.
+
+        key: ASCII representation of bitboard
+
+        Return value: bitboard (binary list)
+    """
+    unpadded = [
+            int(digit) for digit in bin(int(binascii.hexlify(key), 16))[2:]]
+    return [0 for _ in xrange(768 - len(unpadded))] + unpadded
+
+
 def invert_board(board):
-    """ This function computes bitvector of given position but with inverted colors. """
+    """ This function computes bitboard of given position but with inverted colors. """
     inversevector = [0 for _ in xrange(768)]
     for i in xrange(64):
         try:
@@ -117,7 +144,7 @@ def invert_board(board):
     return inversevector
 
 def flip_board(board):
-    """ This function computes bitvector of the mirror image of a given position. """
+    """ This function computes bitboard of the mirror image of a given position. """
     flipvector = [0 for _ in xrange(768)]
     for i in range(8):
         for j in range(8):
@@ -129,7 +156,12 @@ def flip_board(board):
     return flipvector
 
 def reverse_and_flip(board):
-    """ This function computes the bitvector after flipping a given position and reversing the colors. """
+    """ Computes bitboard after flipping position and reversing colors.
+
+        board: object of type chess.Board
+
+        Return value: flipped bitboard
+        """
     reversevector = [0 for _ in xrange(768)]
     for i in range(8):
         for j in range(8):
@@ -143,8 +175,6 @@ def reverse_and_flip(board):
 
 class ChexIndex(AnnoyIndex):
     """ Manages game states from Annoy Index and SQL database. """
-
-    #TODO: Compute ASCII of B, I(B), F(B) and I(F(B)) and only store min(ASCII's) into the chex index.
 
     def __init__(self, chex_index, id_label='FICSGamesDBGameNo',
                     first_indexed_move=10, n_trees=200):
@@ -186,16 +216,20 @@ class ChexIndex(AnnoyIndex):
         while True:
             move_number += 1
 
-            bitvector = board_to_bitvector(node.board())
+            bitboard = board_to_bitboard(node.board())
             inversevector = invert_board(node.board())
             flipvector = flip_board(node.board())
             reversevector = reverse_and_flip(node.board())
 
             # Store as ASCII
-            # to_unhexlify = '%x' % int(''.join(map(str, bitvector)), 2)
+            # to_unhexlify = '%x' % int(''.join(map(str, bitboard)), 2)
 
-            to_unhexlify = min(('%x' % int(''.join(map(str, bitvector)), 2)), ('%x' % int(''.join(map(str, inversevector)), 2)),
-                               ('%x' % int(''.join(map(str, flipvector)), 2)), ('%x' % int(''.join(map(str, reversevector)), 2)))
+            to_unhexlify = min(
+                        ('%x' % int(''.join(map(str, bitboard)), 2)),
+                        ('%x' % int(''.join(map(str, inversevector)), 2)),
+                        ('%x' % int(''.join(map(str, flipvector)), 2)),
+                        ('%x' % int(''.join(map(str, reversevector)), 2))
+                    )
             try:
                 key = binascii.unhexlify(to_unhexlify)
             except TypeError:
@@ -206,12 +240,16 @@ class ChexIndex(AnnoyIndex):
                                                     ]
             else:
                 self.chex_sql[key] = [(game_id, move_number)]
-                self.add_item(self.node_id, bitvector)
+                self.add_item(self.node_id, bitboard)
                 self.node_id += 1
             if node.is_end(): break
             node = node.variations[0]
 
         return 0
+
+    def _annoy_index(self):
+        """
+        """
 
     def save(self):
         self.build(self.n_trees)
@@ -244,24 +282,26 @@ class ChexSearch(object):
                 (board, similarity score, [(game_id, move number), ...]), ...]
         """
 
-        symmetrical_boards = [board_to_bitvector(board), invert_board(board), flip_board(board), reverse_and_flip(board)]
-
+        symmetrical_boards = [board_to_bitboard(board),
+                                invert_board(board),
+                                flip_board(board),
+                                reverse_and_flip(board)]
         results = []
-        for bitvector in symmetrical_boards:
+        for bitboard in symmetrical_boards:
             for annoy_id, similarity in zip(
                                 *self.annoy_index.get_nns_by_vector(
-                                        bitvector, self.results,
+                                        bitboard, self.results,
                                         include_distances=True
                             )):
                 # Recompute ASCII key
-                bitvector = self.annoy_index.get_item_vector(annoy_id)
-                to_unhexlify = '%x' % int(
-                                        ''.join(map(str, map(int, bitvector))), 2)
+                bitboard = self.annoy_index.get_item_vector(annoy_id)
+                to_unhexlify = '%x' % int(''.join(
+                                            map(str, map(int, bitboard))), 2)
                 try:
                     key = binascii.unhexlify(to_unhexlify)
                 except TypeError:
                     key = binascii.unhexlify('0' + to_unhexlify)
-                results.append((bitvector_to_board(bitvector), similarity,
+                results.append((bitboard_to_board(bitboard), similarity,
                                 self.chex_sql[key]))
         return results
 
@@ -331,7 +371,6 @@ if __name__ == '__main__':
         )
     args = parser.parse_args()
     if args.subparser_name == 'index':
-        # print args.chex_index, args.id_label, args.first_indexed_move, args.n_trees, args.pgns
         index = ChexIndex(chex_index=args.chex_index, id_label=args.id_label,
                             first_indexed_move=args.first_indexed_move,
                             n_trees=args.n_trees)
