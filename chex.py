@@ -29,20 +29,6 @@ import logging
 from annoy import AnnoyIndex
 from sqlitedict import SqliteDict
 
-# Configure this a little later
-logging.basicConfig(level=logging.DEBUG,
-                    format='%(asctime)s %(levelname)-10s %(message)s',
-                    datefmt='%m-%d-%Y %H:%M:%S',
-                    filename=LOG_FILE,
-                    filemode='w')
-
-console = logging.StreamHandler()
-console.setLevel(logging.DEBUG)
-formatter = logging.Formatter('%(asctime)s %(levelname)-8s %(message)s')
-console.setFormatter(formatter)
-logging.getLogger('').addHandler(console)
-logging.info('Log file established')
-
 _help_intro = """chex is a search engine for chess game states."""
 
 def help_formatter(prog):
@@ -518,7 +504,19 @@ if __name__ == '__main__':
             default=10,
             help='maximum number of returned game states'
         )
+    parser.add_argument('--verbose', action='store_const', const=True,
+            default=False,
+            help='be talkative'
+        )
     args = parser.parse_args()
+    # Configure this a little later
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
+                        format='%(asctime)s %(levelname)-10s %(message)s',
+                        datefmt='%m-%d-%Y %H:%M:%S')
+    console = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s %(levelname)-8s %(message)s')
+    console.setFormatter(formatter)
+    logging.getLogger('').addHandler(console)
     if args.subparser_name == 'index':
         index = ChexIndex(chex_index=args.chex_index, id_label=args.id_label,
                             first_indexed_move=args.first_indexed_move,
