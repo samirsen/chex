@@ -24,8 +24,24 @@ import random
 import atexit
 import shutil
 import copy
+import tempfile
+import logging
 from annoy import AnnoyIndex
 from sqlitedict import SqliteDict
+
+# Configure this a little later
+logging.basicConfig(level=logging.DEBUG,
+                    format='%(asctime)s %(levelname)-10s %(message)s',
+                    datefmt='%m-%d-%Y %H:%M:%S',
+                    filename=LOG_FILE,
+                    filemode='w')
+
+console = logging.StreamHandler()
+console.setLevel(logging.DEBUG)
+formatter = logging.Formatter('%(asctime)s %(levelname)-8s %(message)s')
+console.setFormatter(formatter)
+logging.getLogger('').addHandler(console)
+logging.info('Log file established')
 
 _help_intro = """chex is a search engine for chess game states."""
 
@@ -206,7 +222,7 @@ class ChexIndex(AnnoyIndex):
             except OSError as e:
                 if e.errno != errno.EEXIST:
                     raise
-        self.scratch = tempdir.mkdtemp(dir=scratch)
+        self.scratch = tempfile.mkdtemp(dir=scratch)
         # Schedule temporary directory for deletion
         atexit.register(shutil.rmtree, self.scratch, ignore_errors=True)
         self.chex_sql = SqliteDict(
@@ -298,11 +314,10 @@ class ChexIndex(AnnoyIndex):
         """
         # Finalize game SQL database for querying
         self.game_sql.commit()
-        self.game_sql.close()
         # For reproducible random draws from database
         random.seed(self.seed)
         last_weights = [0 for _ in xrange(_bitboard_length)]
-        iteration, self.critical_iteration = 0, self.min_iterations
+        iteration, critical_iteration = 0, self.min_iterations
         while True:
             # Draw game
             game_index = random.randint(0, self.game_number)
@@ -311,7 +326,8 @@ class ChexIndex(AnnoyIndex):
             [reference_bitboard, plus_bitboard, minus_bitboard] = map(
                                 key_to_bitboard,
                                 random.sample(
-                                    list(enumerate(self.game_sql[game_index])),
+                                    list(enumerate(
+                                            self.game_sql[str(game_index)])),
                                   3)
                             )
             if abs(minus_bitboard[0] - reference_bitboard[0]) < abs(
@@ -336,7 +352,7 @@ class ChexIndex(AnnoyIndex):
                     break
                 last_weights = copy.copy(self.weights)
                 critical_iteration *= 2
-            if iteration >= max_iterations:
+            if iteration >= self.max_iterations:
                 # Must sqrt so angular distance in annoy works
                 self.weights = [sqrt(weight) for weight in self.weights]
                 break
@@ -352,13 +368,18 @@ class ChexIndex(AnnoyIndex):
                                 for j in xrange(_bitboard_length)])
 
     def save(self):
+        # Compute Mahalanobis matrix
+        self._mahalanobis()
+        # Create annoy index
         self._annoy_index()
         self.build(self.n_trees)
+        # Save all index files
         super(ChexIndex, self).save(
                 os.path.join(self.chex_index, 'annoy.idx')
             )
         self.chex_sql.commit()
         self.chex_sql.close()
+        self.game_sql.close()
         # Clean up
         shutil.rmtree(self.scratch, ignore_errors=True)
 
@@ -514,11 +535,11 @@ if __name__ == '__main__':
                     if index.add_game(chess.pgn.read_game(pgn_stream)):
                         break
                     game_count += 1
-                    print 'Indexed {} games...\r'.format(game_count),
+                    print 'Read {} games...\r'.format(game_count),
                     sys.stdout.flush()
         index.save()
         # TODO: clean up display of this
-        print 'Indexed {} games.'.format(game_count)
+        print 'Read {} games.'.format(game_count)
     else:
         assert args.subparser_name == 'search'
         searcher = ChexSearch(args.chex_index,
