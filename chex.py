@@ -20,6 +20,10 @@ import errno
 import os
 import sys
 import time
+import random
+import atexit
+import shutil
+import copy
 from annoy import AnnoyIndex
 from sqlitedict import SqliteDict
 
@@ -62,16 +66,16 @@ _reverse_colors_offsets = {
     'Q' : 10,
 }
 
-
+_bitboard_length = 768
 
 def board_to_bitboard(board):
     """ Converts chess module's board to bitboard game state representation.
 
         node: game object of type chess.pgn.Game
 
-        Return value: binary vector of length 768 as Python list
+        Return value: binary vector of length _bitboard_length as Python list
     """
-    bitboard = [0 for _ in xrange(768)]
+    bitboard = [0 for _ in xrange(_bitboard_length)]
     for i in xrange(64):
         try:
             bitboard[i*12 + _offsets[board.piece_at(i).symbol()]] = 1
@@ -84,7 +88,7 @@ def bitboard_to_board(bitboard):
 
         TODO: unit test.
 
-        bitboard: iterable of 768 1s and 0s
+        bitboard: iterable of _bitboard_length 1s and 0s
 
         Return value: chess.Board representation of bitboard
     """
@@ -130,12 +134,12 @@ def key_to_bitboard(key):
     """
     unpadded = [
             int(digit) for digit in bin(int(binascii.hexlify(key), 16))[2:]]
-    return [0 for _ in xrange(768 - len(unpadded))] + unpadded
+    return [0 for _ in xrange(_bitboard_length - len(unpadded))] + unpadded
 
 
 def invert_board(board):
     """ Computes bitboard of given position but with inverted colors. """
-    inversevector = [0 for _ in xrange(768)]
+    inversevector = [0 for _ in xrange(_bitboard_length)]
     for i in xrange(64):
         try:
             inversevector[i * 12
@@ -146,7 +150,7 @@ def invert_board(board):
 
 def flip_board(board):
     """ Computes bitboard of the mirror image of a given position. """
-    flipvector = [0 for _ in xrange(768)]
+    flipvector = [0 for _ in xrange(_bitboard_length)]
     for i in range(8):
         for j in range(8):
             try:
@@ -164,7 +168,7 @@ def reverse_and_flip(board):
 
         Return value: flipped bitboard
         """
-    reversevector = [0 for _ in xrange(768)]
+    reversevector = [0 for _ in xrange(_bitboard_length)]
     for i in range(8):
         for j in range(8):
             try:
@@ -181,10 +185,12 @@ class ChexIndex(AnnoyIndex):
     """ Manages game states from Annoy Index and SQL database. """
 
     def __init__(self, chex_index, id_label='FICSGamesDBGameNo',
-                    first_indexed_move=10, n_trees=200):
+                    first_indexed_move=10, n_trees=200, seed=1,
+                    scratch=None, learning_rate=1, min_iterations=100,
+                    max_iterations=5000000, difference=.1):
         """ Number of dimensions is always 8 x 8 x 12; there are 6 black piece
         types, six white piece types, and the board is 8 x 8."""
-        super(ChexIndex, self).__init__(768, metric='angular')
+        super(ChexIndex, self).__init__(_bitboard_length, metric='angular')
         self.id_label = id_label
         self.first_indexed_move = first_indexed_move
         self.chex_index = chex_index
@@ -193,10 +199,30 @@ class ChexIndex(AnnoyIndex):
         except OSError as e:
             if e.errno != errno.EEXIST:
                 raise
+        # Create temporary directory
+        if scratch is not None:
+            try:
+                os.makedirs(self.scratch)
+            except OSError as e:
+                if e.errno != errno.EEXIST:
+                    raise
+        self.scratch = tempdir.mkdtemp(dir=scratch)
+        # Schedule temporary directory for deletion
+        atexit.register(shutil.rmtree, self.scratch, ignore_errors=True)
         self.chex_sql = SqliteDict(
                             os.path.join(self.chex_index, 'sqlite.idx'))
+        self.game_sql = SqliteDict(
+                            os.path.join(self.scratch, 'temp.idx')
+                        )
+        self.game_number = 0
         self.n_trees = n_trees
-        self.key_count = 0
+        # For reproducibly randomly drawing boards
+        self.seed = seed
+        self.learning_rate = learning_rate
+        self.min_iterations = min_iterations
+        self.max_iterations = max_iterations
+        self.difference = difference
+        self.weights = [0 for _ in xrange(_bitboard_length)]
 
     def add_game(self, node):
         """ Adds game parsed by chess library to chex SQL database.
@@ -207,7 +233,6 @@ class ChexIndex(AnnoyIndex):
         """
         if node is None:
             return 1
-
         game_id = node.headers[self.id_label]
         move_number = 0
         for move_number in xrange(self.first_indexed_move - 1):
@@ -216,7 +241,6 @@ class ChexIndex(AnnoyIndex):
             except IndexError:
                 # Too few moves to index
                 return 0
-
         while True:
             move_number += 1
 
@@ -235,13 +259,87 @@ class ChexIndex(AnnoyIndex):
                                                     ]
             else:
                 self.chex_sql[key] = [(game_id, move_number)]
-                self.key_count += 1
+            if self.game_number in self.game_sql:
+                self.game_sql[self.game_number].append(key)
+            else:
+                self.game_sql[self.game_number] = [key]
             if node.is_end(): break
             node = node.variations[0]
-
+        self.game_number += 1
         return 0
 
+    def _mahalanobis_loss(self,
+                reference_bitboard, plus_bitboard, minus_bitboard):
+        """ Computes value of loss function for finding Mahalanobis metric.
+
+            reference_bitboard, plus_bitboard, minus_bitboard: explained
+                in algo
+
+            Return value: value of loss function 
+        """
+        return max(0.,
+                1.  + sum([minus_bitboard[i]
+                            * reference_bitboard[i] * self.weights[i]
+                            for i in xrange(_bitboard_length)])
+                   - sum([plus_bitboard[i]
+                            * reference_bitboard[i] * self.weights[i]
+                            for i in xrange(_bitboard_length)]))
+
     def _mahalanobis(self):
+        """ Computes sparse Mahalanobis metric using algorithm from paper.
+
+            The reference is SOML: Sparse online metric learning with
+                application to image retrieval by Gao et al. We implement
+                their algorithm 1: SOML-TG (sparse online metric learning via
+                truncated gradient). We set lambda = 0 and use no
+                sparsity-promoting regularization term.
+
+            Return value: diagonal of Mahalanobis metric
+        """
+        # Finalize game SQL database for querying
+        self.game_sql.commit()
+        self.game_sql.close()
+        # For reproducible random draws from database
+        random.seed(self.seed)
+        last_weights = [0 for _ in xrange(_bitboard_length)]
+        iteration, self.critical_iteration = 0, self.min_iterations
+        while True:
+            # Draw game
+            game_index = random.randint(0, self.game_number)
+            # Check that the sampled boards are shuffled
+            # Is the Python algo reservoir sampling? If so yes.
+            [reference_bitboard, plus_bitboard, minus_bitboard] = map(
+                                key_to_bitboard,
+                                random.sample(
+                                    list(enumerate(self.game_sql[game_index])),
+                                  3)
+                            )
+            if abs(minus_bitboard[0] - reference_bitboard[0]) < abs(
+                plus_bitboard[0] - reference_bitboard[0]):
+                minus_bitboard, plus_bitboard = plus_bitboard, minus_bitboard
+            if self._mahalanobis_loss(reference_bitboard[1],
+                                        plus_bitboard[1], minus_bitboard[1],
+                                        self.weights) > 0:
+                v = [self. weights[i] - self.learning_rate
+                        * reference_bitboard[1][i]
+                        * (plus_bitboard[1][i] - minus_bitboard[1][i])
+                        for i in xrange(_bitboard_length)]
+                self.weights = [max(0, v[j]) if v[j] >=0 else min(0, v[j])
+                                for j in xrange(_bitboard_length)]
+            iteration += 1
+            if iteration >= critical_iteration:
+                if sqrt(sum([(last_weights[i] - self.weights[i])**2
+                                for i in xrange(_bitboard_length)])) <= (
+                        self.difference):
+                    # Must sqrt so angular distance in annoy works
+                    self.weights = [sqrt(weight) for weight in self.weights]
+                    break
+                last_weights = copy.copy(self.weights)
+                critical_iteration *= 2
+            if iteration >= max_iterations:
+                # Must sqrt so angular distance in annoy works
+                self.weights = [sqrt(weight) for weight in self.weights]
+                break
 
     def _annoy_index(self):
         """ Adds all boards from chex SQL database to Annoy index
@@ -249,7 +347,9 @@ class ChexIndex(AnnoyIndex):
             No return value.
         """
         for i, key in enumerate(self.chex_sql):
-            self.add_item(i, key_to_bitboard(key))
+            bitboard = key_to_bitboard(key)
+            self.add_item(i, [self.weights[j] * bitboard[j]
+                                for j in xrange(_bitboard_length)])
 
     def save(self):
         self._annoy_index()
@@ -259,6 +359,8 @@ class ChexIndex(AnnoyIndex):
             )
         self.chex_sql.commit()
         self.chex_sql.close()
+        # Clean up
+        shutil.rmtree(self.scratch, ignore_errors=True)
 
 class ChexSearch(object):
     """ Searches Chex index for game states and associated games. """
@@ -269,7 +371,7 @@ class ChexSearch(object):
         self.chex_index = chex_index
         self.results = results
         self.search_k = search_k
-        self.annoy_index = AnnoyIndex(768, metric='angular')
+        self.annoy_index = AnnoyIndex(_bitboard_length, metric='angular')
         self.annoy_index.load(os.path.join(self.chex_index, 'annoy.idx'))
         self.chex_sql = SqliteDict(
                             os.path.join(self.chex_index, 'sqlite.idx'))
@@ -352,6 +454,31 @@ if __name__ == '__main__':
             default=200,
             help='number of annoy trees'
         )
+    index_parser.add_argument('--scratch', metavar='<dir>', type=str,
+            required=False,
+            default=None,
+            help=('where to store temporary files; default is securely '
+                  'created directory in $TMPDIR or similar'))
+    index_parser.add_argument('--learning_rate', metavar='<dec>', type=float,
+            required=False,
+            default=1,
+            help='learning rate for Mahalanobis metric')
+    index_parser.add_argument('--min-iterations', metavar='<int>', type=int,
+            required=False,
+            default=100,
+            help='minimum number of iterations for learning Mahalanobis metric'
+        )
+    index_parser.add_argument('--max-iterations', metavar='<int>', type=int,
+            required=False,
+            default=100,
+            help='maximum number of iterations for learning Mahalanobis metric'
+        )
+    index_parser.add_argument('--difference', metavar='<dec>', type=float,
+            required=False,
+            default=.1,
+            help=('maximum Euclidean distance between Mahalanobis matrices '
+                  'for deciding convergence')
+        )
     search_parser.add_argument('-f', '--board-fen', metavar='<file>',
             required=True, type=str,
             help='first field of FEN describing board to search for')
@@ -374,7 +501,11 @@ if __name__ == '__main__':
     if args.subparser_name == 'index':
         index = ChexIndex(chex_index=args.chex_index, id_label=args.id_label,
                             first_indexed_move=args.first_indexed_move,
-                            n_trees=args.n_trees)
+                            n_trees=args.n_trees, scratch=args.scratch,
+                            learning_rate=args.learning_rate,
+                            min_iterations=args.min_iterations,
+                            max_iterations=args.max_iterations,
+                            difference=args.difference)
 
         for pgn in args.pgns:
             game_count = 0
