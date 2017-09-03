@@ -26,6 +26,7 @@ import shutil
 import copy
 import tempfile
 import logging
+from math import sqrt
 from annoy import AnnoyIndex
 from sqlitedict import SqliteDict
 
@@ -183,7 +184,7 @@ def reverse_and_flip(board):
     return reversevector
 
 
-class ChexIndex(AnnoyIndex):
+class ChexIndex(object):
     """ Manages game states from Annoy Index and SQL database. """
 
     def __init__(self, chex_index, id_label='FICSGamesDBGameNo',
@@ -192,7 +193,7 @@ class ChexIndex(AnnoyIndex):
                     max_iterations=5000000, difference=.1):
         """ Number of dimensions is always 8 x 8 x 12; there are 6 black piece
         types, six white piece types, and the board is 8 x 8."""
-        super(ChexIndex, self).__init__(_bitboard_length, metric='angular')
+        self.annoy_index = AnnoyIndex(_bitboard_length, metric='angular')
         self.id_label = id_label
         self.first_indexed_move = first_indexed_move
         self.chex_index = chex_index
@@ -262,7 +263,8 @@ class ChexIndex(AnnoyIndex):
             else:
                 self.chex_sql[key] = [(game_id, move_number)]
             if self.game_number in self.game_sql:
-                self.game_sql[self.game_number].append(key)
+                self.game_sql[self.game_number] = self.game_sql[
+                            self.game_number] + [key]
             else:
                 self.game_sql[self.game_number] = [key]
             if node.is_end(): break
@@ -300,28 +302,35 @@ class ChexIndex(AnnoyIndex):
         """
         # Finalize game SQL database for querying
         self.game_sql.commit()
+        print self.game_sql.keys()
         # For reproducible random draws from database
         random.seed(self.seed)
         last_weights = [0 for _ in xrange(_bitboard_length)]
         iteration, critical_iteration = 0, self.min_iterations
         while True:
             # Draw game
-            game_index = random.randint(0, self.game_number)
+            game_index = random.randint(0, self.game_number - 1)
             # Check that the sampled boards are shuffled
             # Is the Python algo reservoir sampling? If so yes.
-            [reference_bitboard, plus_bitboard, minus_bitboard] = map(
-                                key_to_bitboard,
-                                random.sample(
-                                    list(enumerate(
-                                            self.game_sql[str(game_index)])),
-                                  3)
-                            )
+            try:
+                [reference_bitboard,
+                    plus_bitboard, minus_bitboard] = random.sample(
+                            list(
+                                enumerate(
+                                    map(key_to_bitboard, self.game_sql[game_index])
+                                )
+                            ), 3
+                        )
+            except:
+                print map(key_to_bitboard, self.game_sql[game_index])
+                print self.game_sql[game_index]
+                raise
             if abs(minus_bitboard[0] - reference_bitboard[0]) < abs(
                 plus_bitboard[0] - reference_bitboard[0]):
                 minus_bitboard, plus_bitboard = plus_bitboard, minus_bitboard
             if self._mahalanobis_loss(reference_bitboard[1],
-                                        plus_bitboard[1], minus_bitboard[1],
-                                        self.weights) > 0:
+                                        plus_bitboard[1], minus_bitboard[1]
+                                        ) > 0:
                 v = [self. weights[i] - self.learning_rate
                         * reference_bitboard[1][i]
                         * (plus_bitboard[1][i] - minus_bitboard[1][i])
@@ -350,15 +359,15 @@ class ChexIndex(AnnoyIndex):
         """
         for i, key in enumerate(self.chex_sql):
             bitboard = key_to_bitboard(key)
-            self.add_item(i, [self.weights[j] * bitboard[j]
-                                for j in xrange(_bitboard_length)])
+            self.annoy_index.add_item(i, [self.weights[j] * bitboard[j]
+                                        for j in xrange(_bitboard_length)])
 
     def save(self):
         # Compute Mahalanobis matrix
         self._mahalanobis()
         # Create annoy index
         self._annoy_index()
-        self.build(self.n_trees)
+        self.annoy_index.build(self.n_trees)
         # Save all index files
         super(ChexIndex, self).save(
                 os.path.join(self.chex_index, 'annoy.idx')
@@ -535,9 +544,9 @@ if __name__ == '__main__':
                     game_count += 1
                     print 'Read {} games...\r'.format(game_count),
                     sys.stdout.flush()
-        index.save()
         # TODO: clean up display of this
         print 'Read {} games.'.format(game_count)
+        index.save()
     else:
         assert args.subparser_name == 'search'
         searcher = ChexSearch(args.chex_index,
