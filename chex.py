@@ -225,7 +225,7 @@ class ChexIndex(object):
         self.min_iterations = min_iterations
         self.max_iterations = max_iterations
         self.difference = difference
-        self.weights = [0 for _ in xrange(_bitboard_length)]
+        self.weights = [1. for _ in xrange(_bitboard_length)]
 
     def add_game(self, node):
         """ Adds game parsed by chess library to chex SQL database.
@@ -302,11 +302,11 @@ class ChexIndex(object):
         """
         # Finalize game SQL database for querying
         self.game_sql.commit()
-        print self.game_sql.keys()
         # For reproducible random draws from database
         random.seed(self.seed)
         last_weights = [0 for _ in xrange(_bitboard_length)]
         iteration, critical_iteration = 0, self.min_iterations
+        whatever = 0
         while True:
             # Draw game
             game_index = random.randint(0, self.game_number - 1)
@@ -324,20 +324,30 @@ class ChexIndex(object):
             except ValueError:
                 # Not enough moves in game to index
                 continue
+            reference_bitboard, plus_bitboard, minus_bitboard = (
+                    list(reference_bitboard), list(plus_bitboard),
+                    list(minus_bitboard)
+                )
+            for bitboard in reference_bitboard, plus_bitboard, minus_bitboard:
+                norm_constant = 1. / sqrt(sum(bitboard[1]))
+                bitboard[1] = [component * norm_constant 
+                                    for component in bitboard[1]]
             if abs(minus_bitboard[0] - reference_bitboard[0]) < abs(
                 plus_bitboard[0] - reference_bitboard[0]):
                 minus_bitboard, plus_bitboard = plus_bitboard, minus_bitboard
             if self._mahalanobis_loss(reference_bitboard[1],
                                         plus_bitboard[1], minus_bitboard[1]
                                         ) > 0:
-                v = [self. weights[i] - self.learning_rate
+                v = [self.weights[i] - self.learning_rate
                         * reference_bitboard[1][i]
                         * (plus_bitboard[1][i] - minus_bitboard[1][i])
                         for i in xrange(_bitboard_length)]
-                self.weights = [max(0, v[j]) if v[j] >=0 else min(0, v[j])
+                self.weights = [max(0, v[j]) if v[j] >= 0 else min(0, v[j])
                                 for j in xrange(_bitboard_length)]
             iteration += 1
             if iteration >= critical_iteration:
+                print critical_iteration
+                print self.weights
                 if sqrt(sum([(last_weights[i] - self.weights[i])**2
                                 for i in xrange(_bitboard_length)])) <= (
                         self.difference):
@@ -348,6 +358,7 @@ class ChexIndex(object):
                 critical_iteration *= 2
             if iteration >= self.max_iterations:
                 # Must sqrt so angular distance in annoy works
+                print self.weights
                 self.weights = [sqrt(weight) for weight in self.weights]
                 break
 
@@ -474,7 +485,7 @@ if __name__ == '__main__':
             default=None,
             help=('where to store temporary files; default is securely '
                   'created directory in $TMPDIR or similar'))
-    index_parser.add_argument('--learning_rate', metavar='<dec>', type=float,
+    index_parser.add_argument('--learning-rate', metavar='<dec>', type=float,
             required=False,
             default=1,
             help='learning rate for Mahalanobis metric')
