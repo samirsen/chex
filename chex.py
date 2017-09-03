@@ -269,6 +269,9 @@ class ChexIndex(object):
                 self.game_sql[self.game_number] = [key]
             if node.is_end(): break
             node = node.variations[0]
+        if self.game_number == 7:
+            print self.game_sql[self.game_number]
+            quit()
         self.game_number += 1
         return 0
 
@@ -315,16 +318,15 @@ class ChexIndex(object):
             try:
                 [reference_bitboard,
                     plus_bitboard, minus_bitboard] = random.sample(
-                            list(
-                                enumerate(
-                                    map(key_to_bitboard, self.game_sql[game_index])
-                                )
-                            ), 3
-                        )
-            except:
-                print map(key_to_bitboard, self.game_sql[game_index])
-                print self.game_sql[game_index]
-                raise
+                        list(
+                            enumerate(
+                                map(key_to_bitboard, self.game_sql[game_index])
+                            )
+                        ), 3
+                    )
+            except ValueError:
+                # Not enough moves in game to index
+                continue
             if abs(minus_bitboard[0] - reference_bitboard[0]) < abs(
                 plus_bitboard[0] - reference_bitboard[0]):
                 minus_bitboard, plus_bitboard = plus_bitboard, minus_bitboard
