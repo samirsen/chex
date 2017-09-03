@@ -269,9 +269,6 @@ class ChexIndex(object):
                 self.game_sql[self.game_number] = [key]
             if node.is_end(): break
             node = node.variations[0]
-        if self.game_number == 7:
-            print self.game_sql[self.game_number]
-            quit()
         self.game_number += 1
         return 0
 
